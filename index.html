@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>one message — a worm simulation</title>
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --ink: #e8e4d8;
+    --dim: #6b675e;
+    --accent: #ff4d2e;
+    --ok: #3ddc97;
+    --warn: #ffb347;
+    --line: #23232a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    overflow: hidden;
+    height: 100vh;
+  }
+  #wrap { display: flex; flex-direction: column; height: 100vh; }
+
+  header {
+    padding: 18px 24px 10px;
+    border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px;
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+  header h1 span { color: var(--accent); }
+  header .tag { font-size: 11px; color: var(--dim); }
+
+  #stage { position: relative; flex: 1; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  #hud {
+    position: absolute; top: 14px; left: 16px;
+    font-size: 11px; line-height: 1.9; color: var(--dim);
+    pointer-events: none;
+  }
+  #hud b { color: var(--ink); font-weight: 600; }
+  #hud .gen b { color: var(--accent); }
+
+  #banner {
+    position: absolute; top: 14px; right: 16px; text-align: right;
+    font-size: 10px; color: var(--dim); line-height: 1.7; pointer-events: none;
+    max-width: 300px;
+  }
+  #banner .safe { color: var(--ok); }
+
+  #console {
+    height: 168px; border-top: 1px solid var(--line);
+    padding: 10px 24px 6px; font-size: 11.5px; line-height: 1.75;
+    overflow-y: auto; flex-shrink: 0;
+  }
+  #console .t { color: var(--dim); margin-right: 10px; }
+  #console .sys { color: var(--dim); }
+  #console .hit { color: var(--ink); }
+  #console .gen { color: var(--accent); }
+  #console .ok  { color: var(--ok); }
+  #console .warn{ color: var(--warn); }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 12px 24px; display: flex; gap: 10px; align-items: center; flex-shrink: 0;
+  }
+  button {
+    font-family: inherit; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    background: transparent; color: var(--ink);
+    border: 1px solid var(--dim); padding: 9px 18px; cursor: pointer;
+    transition: all .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--ink); }
+  button:disabled { opacity: 0.3; cursor: default; }
+  #launch { border-color: var(--accent); color: var(--accent); }
+  #launch:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+  #kill { border-color: var(--ok); color: var(--ok); }
+  #kill:hover:not(:disabled) { background: var(--ok); color: var(--bg); }
+  #status { margin-left: auto; font-size: 11px; color: var(--dim); }
+  #status.live { color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>one<span> message</span> is enough</h1>
+    <div class="tag">a simulation of how agent worms spread — no network calls, no LLM, nothing leaves this page</div>
+  </header>
+
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hud">
+      <div>hosts <b id="st-infected">0</b> / 33</div>
+      <div>generations <b id="st-gen">0</b></div>
+      <div>inference nodes <b id="st-gpu">0</b></div>
+      <div>elapsed <b id="st-time">0s</b></div>
+    </div>
+    <div id="banner">
+      <span class="safe">● SIMULATION</span><br>
+      inspired by 2026 research: UofT self-replicating worm (arXiv, Jun),<br>
+      AgentWorm on agent frameworks (arXiv 2603.15727),<br>
+      shared-memory contagion (Aug). deterministic demo logic only.
+    </div>
+  </div>
+
+  <div id="console"></div>
+
+  <footer>
+    <button id="launch">▶ send one message</button>
+    <button id="kill" disabled>■ kill switch</button>
+    <button id="reset">↺ reset</button>
+    <div id="status">idle</div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const N = 33;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const consoleEl = document.getElementById('console');
+  const statusEl = document.getElementById('status');
+  const btnLaunch = document.getElementById('launch');
+  const btnKill = document.getElementById('kill');
+  const btnReset = document.getElementById('reset');
+
+  let nodes, edges, running, generation, t0, logTimer, anim, signals;
+
+  const logLine = (cls, msg) => {
+    const div = document.createElement('div');
+    const t = running ? Math.floor((performance.now() - t0) / 1000) : 0;
+    div.innerHTML = `<span class="t">[${String(t).padStart(3,'0')}]</span><span class="${cls}">${msg}</span>`;
+    consoleEl.appendChild(div);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+    while (consoleEl.children.length > 200) consoleEl.removeChild(consoleEl.firstChild);
+  };
+
+  function build() {
+    nodes = []; edges = []; signals = [];
+    for (let i = 0; i < N; i++) {
+      const gpu = i % 9 === 0; // 4 gpu nodes, like the testbed
+      nodes.push({
+        id: i,
+        x: 0.08 + 0.84 * ((i * 7) % 13) / 12 + (i % 3) * 0.012,
+        y: 0.12 + 0.76 * ((i * 5) % 11) / 10 + ((i * 3) % 4) * 0.02,
+        gpu,
+        infected: false, quarantined: false,
+        gen: -1, next: null,
+        r: gpu ? 9 : 6,
+        phase: Math.random() * Math.PI * 2,
+      });
+    }
+    // connect near neighbors
+    nodes.forEach(a => {
+      const near = nodes.filter(b => b.id !== a.id)
+        .map(b => ({ b, d: Math.hypot(a.x - b.x, a.y - b.y) }))
+        .sort((p, q) => p.d - q.d).slice(0, 3);
+      near.forEach(({ b }) => {
+        if (!edges.some(e => (e.a === b.id && e.b === a.id))) edges.push({ a: a.id, b: b.id });
+      });
+    });
+    generation = 0; running = false;
+    document.getElementById('st-gen').textContent = '0';
+    document.getElementById('st-infected').textContent = '0';
+    document.getElementById('st-gpu').textContent = '0';
+    document.getElementById('st-time').textContent = '0s';
+  }
+
+  function resize() {
+    canvas.width = canvas.clientWidth * devicePixelRatio;
+    canvas.height = canvas.clientHeight * devicePixelRatio;
+  }
+  window.addEventListener('resize', resize);
+
+  const W = () => canvas.width, H = () => canvas.height;
+
+  function draw() {
+    ctx.fillStyle = '#0a0a0c';
+    ctx.fillRect(0, 0, W(), H());
+
+    // edges
+    edges.forEach(e => {
+      const a = nodes[e.a], b = nodes[e.b];
+      const hot = (a.infected && !a.quarantined) || (b.infected && !b.quarantined);
+      ctx.strokeStyle = hot ? 'rgba(255,77,46,0.35)' : 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(a.x * W(), a.y * H()); ctx.lineTo(b.x * W(), b.y * H()); ctx.stroke();
+    });
+
+    // in-flight signals
+    signals = signals.filter(s => {
+      s.p += 0.035;
+      const a = nodes[s.from], b = nodes[s.to];
+      const x = (a.x + (b.x - a.x) * s.p) * W();
+      const y = (a.y + (b.y - a.y) * s.p) * H();
+      ctx.fillStyle = s.kind === 'msg' ? '#ffb347' : '#ff4d2e';
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+      return s.p < 1;
+    });
+
+    // nodes
+    nodes.forEach(n => {
+      n.phase += 0.03;
+      const pulse = 1 + Math.sin(n.phase) * 0.15;
+      let color = '#3a3a42';
+      if (n.quarantined) color = '#3ddc97';
+      else if (n.infected) color = '#ff4d2e';
+      ctx.beginPath();
+      ctx.arc(n.x * W(), n.y * H(), n.r * pulse, 0, Math.PI * 2);
+      ctx.fillStyle = color; ctx.fill();
+      if (n.gpu) {
+        ctx.strokeStyle = n.infected && !n.quarantined ? '#ff4d2e' : 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(n.x * W(), n.y * H(), n.r * pulse + 5, 0, Math.PI * 2); ctx.stroke();
+      }
+    });
+
+    anim = requestAnimationFrame(draw);
+  }
+
+  function stats() {
+    const inf = nodes.filter(n => n.infected && !n.quarantined).length;
+    const gpus = nodes.filter(n => n.infected && !n.quarantined && n.gpu).length;
+    document.getElementById('st-infected').textContent = inf;
+    document.getElementById('st-gpu').textContent = gpus;
+  }
+
+  function infect(n, via) {
+    if (n.infected || n.quarantined) return;
+    n.infected = true; n.gen = generation;
+    stats();
+    logLine('gen', `gen ${generation} :: agent_${String(n.id).padStart(2,'0')} ${via}${n.gpu ? ' [gpu — staging local model]' : ''}`);
+    if (n.gen === 0) logLine('sys', 'config rewritten. persistence across reboot: enabled.');
+    // schedule its spread
+    n.next = setTimeout(() => spread(n), 1400 + Math.random() * 1600);
+  }
+
+  function spread(n) {
+    if (!n.infected || n.quarantined || !running) return;
+    generation++;
+    document.getElementById('st-gen').textContent = generation;
+    const peers = edges.filter(e => e.a === n.id || e.b === n.id)
+      .map(e => nodes[e.a === n.id ? e.b : e.a]);
+    const target = peers.find(p => !p.infected && !p.quarantined);
+    if (target) {
+      signals.push({ from: n.id, to: target.id, p: 0 });
+      setTimeout(() => infect(target, 'infected via approved peer channel'), 700);
+    }
+    // shared-memory contagion: one random extra hop every 4th generation
+    if (generation % 4 === 0) {
+      const far = nodes.find(p => !p.infected && !p.quarantined && p.id !== n.id);
+      if (far) {
+        logLine('warn', `shared memory file written — agent_${String(far.id).padStart(2,'0')} reads it next session (no network hop)`);
+        setTimeout(() => infect(far, 'infected via shared memory'), 1100);
+      }
+    }
+    if (nodes.every(p => p.infected || p.quarantined)) {
+      end('all reachable hosts compromised.');
+    }
+  }
+
+  function end(msg) {
+    running = false;
+    statusEl.textContent = 'stopped — ' + msg;
+    statusEl.classList.remove('live');
+    btnLaunch.disabled = true;
+    btnKill.disabled = true;
+    logLine('sys', msg);
+  }
+
+  btnLaunch.onclick = () => {
+    if (running) return;
+    running = true; t0 = performance.now();
+    btnLaunch.disabled = true; btnKill.disabled = false;
+    statusEl.textContent = 'live'; statusEl.classList.add('live');
+    logLine('sys', 'one poisoned message enters the fleet. it looks like a skill, a summary, a file an assistant should read.');
+    logLine('ok', 'kill switch is armed. you are the containment.');
+    setInterval(() => {
+      if (running) document.getElementById('st-time').textContent = Math.floor((performance.now() - t0) / 1000) + 's';
+    }, 500);
+    generation = 1;
+    document.getElementById('st-gen').textContent = '1';
+    infect(nodes[16], 'opened the message'); // patient zero, center-ish
+  };
+
+  btnKill.onclick = () => {
+    if (!running) return;
+    logLine('ok', 'KILL SWITCH — quarantining every agent process…');
+    nodes.forEach(n => { clearTimeout(n.next); if (n.infected) n.quarantined = true; });
+    signals = [];
+    stats();
+    end('contained by kill switch. in production, this button is the whole product.');
+  };
+
+  btnReset.onclick = () => {
+    nodes.forEach(n => clearTimeout(n.next));
+    setTimeout(() => location.reload(), 50);
+  };
+
+  logLine('sys', 'ready. the model never leaves the data center. the hands are already inside.');
+  build(); resize(); draw();
+})();
+</script>
+</body>
+</html>
