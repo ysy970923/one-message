@@ -142,10 +142,13 @@
     nodes = []; edges = []; signals = [];
     for (let i = 0; i < N; i++) {
       const gpu = i % 9 === 0; // 4 gpu nodes, like the testbed
+      // jittered 7x5 grid — even spread, no diagonal artifacts
+      const col = i % 7, row = Math.floor(i / 7);
+      const jx = (i * 2654435761 % 100) / 100, jy = (i * 340573321 % 100) / 100;
       nodes.push({
         id: i,
-        x: 0.08 + 0.84 * ((i * 7) % 13) / 12 + (i % 3) * 0.012,
-        y: 0.12 + 0.76 * ((i * 5) % 11) / 10 + ((i * 3) % 4) * 0.02,
+        x: 0.10 + col * 0.133 + jx * 0.06,
+        y: 0.14 + row * 0.165 + jy * 0.07,
         gpu,
         infected: false, quarantined: false,
         gen: -1, next: null,
